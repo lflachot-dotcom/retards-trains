@@ -1,0 +1,43 @@
+name: Collecte retards SNCF
+
+on:
+  schedule:
+    # Toutes les 15 minutes, 24h/24 en UTC.
+    # Le script lui-même ignore la fenêtre 1h-4h heure de Paris.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}  # permet aussi un lancement manuel depuis l'onglet Actions
+
+permissions:
+  contents: write  # nécessaire pour que le workflow puisse committer le fichier CSV
+
+jobs:
+  collecte:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mettre en cache le GTFS statique (pour ne pas le retélécharger à chaque run)
+        uses: actions/cache@v4
+        with:
+          path: .gtfs_cache
+          key: gtfs-static-cache-v1
+
+      - name: Installer les dépendances
+        run: pip install requests gtfs-realtime-bindings pandas
+
+      - name: Lancer la collecte
+        run: python collecte.py
+
+      - name: Committer le fichier mis à jour
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/*.csv
+          git diff --staged --quiet || git commit -m "Collecte retards $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
