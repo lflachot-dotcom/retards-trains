@@ -1,3 +1,16 @@
+"""
+Collecte incrémentale des retards SNCF - conçu pour GitHub Actions
+=====================================================================
+
+Ce script est prévu pour être lancé toutes les 15 minutes par un workflow
+GitHub Actions. À chaque exécution :
+  - si l'heure locale (Europe/Paris) est entre 1h et 4h du matin -> ne fait rien
+  - sinon -> récupère les retards actuels et les AJOUTE au fichier CSV du jour
+    (data/retards_YYYY-MM-DD.csv), sans écraser ce qui a déjà été collecté.
+
+Dépendances : requests, gtfs-realtime-bindings, pandas
+"""
+
 import datetime
 import io
 import os
@@ -107,7 +120,9 @@ def collect_current_delays() -> pd.DataFrame:
         return pd.DataFrame()
 
     rt_df = pd.DataFrame(rows)
-    full_df = rt_df.merge(trips_df, on="trip_id", how="left")
+    full_df = rt_df.merge(
+        trips_df, left_on="trip_id", right_on="trip_trip_id", how="left"
+    )
     full_df = full_df.merge(
         stops_df, left_on="stop_id_rt", right_on="stop_stop_id", how="left"
     )
