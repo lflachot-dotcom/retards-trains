@@ -37,6 +37,10 @@ SILENCE_END_HOUR = 4
 # Seuil de retard en secondes pour être conservé (0 = tout retard, même 1 sec)
 DELAY_THRESHOLD_SEC = 0
 
+# Mot-clé pour ne garder que les TGV INOUI (recherche insensible à la casse
+# dans route_long_name / route_short_name, ex: "OCETGV INOUI")
+INOUI_KEYWORD = "INOUI"
+
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 
@@ -126,6 +130,16 @@ def collect_current_delays() -> pd.DataFrame:
     full_df = full_df.merge(
         stops_df, left_on="stop_id_rt", right_on="stop_stop_id", how="left"
     )
+
+    # --- Filtre TGV INOUI ---
+    route_name_combined = (
+        full_df.get("route_route_long_name", "").fillna("")
+        + " "
+        + full_df.get("route_route_short_name", "").fillna("")
+    )
+    full_df = full_df[route_name_combined.str.contains(INOUI_KEYWORD, case=False, na=False)]
+    # -------------------------
+
     return full_df
 
 
