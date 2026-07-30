@@ -121,7 +121,10 @@ def collect_current_delays() -> pd.DataFrame:
             })
 
     if not rows:
+        print("DIAGNOSTIC: 0 stop_time_update avec un retard détecté dans le flux brut.")
         return pd.DataFrame()
+
+    print(f"DIAGNOSTIC: {len(rows)} lignes avec retard détecté avant jointure statique.")
 
     rt_df = pd.DataFrame(rows)
     full_df = rt_df.merge(
@@ -131,13 +134,19 @@ def collect_current_delays() -> pd.DataFrame:
         stops_df, left_on="stop_id_rt", right_on="stop_stop_id", how="left"
     )
 
+    nb_non_matches = full_df["trip_trip_id"].isna().sum()
+    print(f"DIAGNOSTIC: {nb_non_matches}/{len(full_df)} trip_id du flux RT introuvables dans le GTFS statique en cache.")
+
     # --- Filtre TGV INOUI ---
     route_name_combined = (
         full_df.get("route_route_long_name", "").fillna("")
         + " "
         + full_df.get("route_route_short_name", "").fillna("")
     )
+    print(f"DIAGNOSTIC: exemples de noms de route trouvés : {route_name_combined.unique()[:10].tolist()}")
+
     full_df = full_df[route_name_combined.str.contains(INOUI_KEYWORD, case=False, na=False)]
+    print(f"DIAGNOSTIC: {len(full_df)} lignes après filtre INOUI.")
     # -------------------------
 
     return full_df
