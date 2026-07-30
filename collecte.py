@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 import pandas as pd
 
-GTFS_STATIC_URL = "https://eu.ftp.opendatasoft.com/sncf/gtfs/export_gtfs_voyages.zip"
+GTFS_STATIC_URL = "https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip"
 GTFS_RT_TRIP_UPDATES_URL = "https://proxy.transport.data.gouv.fr/resource/sncf-gtfs-rt-trip-updates"
 
 CACHE_DIR = ".gtfs_cache"
