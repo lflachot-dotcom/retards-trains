@@ -148,16 +148,19 @@ def collect_current_delays() -> pd.DataFrame:
             pass
     # ------------------------------------------------------------------------
 
-    # --- Filtre TGV INOUI ---
-    route_name_combined = (
-        full_df.get("route_route_long_name", "").fillna("")
-        + " "
-        + full_df.get("route_route_short_name", "").fillna("")
-    )
-    print(f"DIAGNOSTIC: exemples de noms de route trouvés : {route_name_combined.unique()[:10].tolist()}")
+    # --- Filtre TGV INOUI (amélioré) ---
+    # 1. Identifier les trip_id qui ont AU MOINS UN arrêt marqué "INOUI"
+    #    dans leur stop_id (typiquement les gares avec quai dédié TGV INOUI).
+    trip_ids_inoui = full_df.loc[
+        full_df["stop_id_rt"].str.contains(INOUI_KEYWORD, case=False, na=False),
+        "trip_id"
+    ].unique()
 
-    full_df = full_df[route_name_combined.str.contains(INOUI_KEYWORD, case=False, na=False)]
-    print(f"DIAGNOSTIC: {len(full_df)} lignes après filtre INOUI.")
+    print(f"DIAGNOSTIC: {len(trip_ids_inoui)} trip_id identifiés comme TGV INOUI.")
+
+    # 2. Garder TOUS les arrêts de ces trains (pas seulement les arrêts marqués INOUI)
+    full_df = full_df[full_df["trip_id"].isin(trip_ids_inoui)]
+    print(f"DIAGNOSTIC: {len(full_df)} lignes après filtre INOUI (tous les arrêts des trains identifiés).")
     # -------------------------
 
     return full_df
