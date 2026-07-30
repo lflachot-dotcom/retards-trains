@@ -22,11 +22,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Mettre en cache le GTFS statique (pour ne pas le retélécharger à chaque run)
+      - name: Déterminer la date du jour (Paris) pour la clé de cache
+        id: date
+        run: echo "today=$(TZ='Europe/Paris' date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Mettre en cache le GTFS statique (renouvelé chaque jour)
         uses: actions/cache@v4
         with:
           path: .gtfs_cache
-          key: gtfs-static-cache-v1
+          key: gtfs-static-cache-${{ steps.date.outputs.today }}
 
       - name: Installer les dépendances
         run: pip install requests gtfs-realtime-bindings pandas
