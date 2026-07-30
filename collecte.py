@@ -137,6 +137,17 @@ def collect_current_delays() -> pd.DataFrame:
     nb_non_matches = full_df["trip_trip_id"].isna().sum()
     print(f"DIAGNOSTIC: {nb_non_matches}/{len(full_df)} trip_id du flux RT introuvables dans le GTFS statique en cache.")
 
+    # --- DIAGNOSTIC TEMPORAIRE : chercher INOUI dans TOUTES les colonnes ---
+    for col in full_df.columns:
+        try:
+            mask = full_df[col].astype(str).str.contains("INOUI", case=False, na=False)
+            if mask.any():
+                exemples = full_df.loc[mask, col].unique()[:5].tolist()
+                print(f"DIAGNOSTIC: colonne '{col}' contient INOUI, exemples: {exemples}")
+        except Exception:
+            pass
+    # ------------------------------------------------------------------------
+
     # --- Filtre TGV INOUI ---
     route_name_combined = (
         full_df.get("route_route_long_name", "").fillna("")
