@@ -1,12 +1,21 @@
 """
-Collecte incrémentale des retards SNCF - conçu pour GitHub Actions
-=====================================================================
+Collecte des RETARDS FINAUX par ARRÊT des TGV INOUI - conçu pour GitHub Actions
+=================================================================================
 
-Ce script est prévu pour être lancé toutes les 15 minutes par un workflow
-GitHub Actions. À chaque exécution :
-  - si l'heure locale (Europe/Paris) est entre 1h et 4h du matin -> ne fait rien
-  - sinon -> récupère les retards actuels et les AJOUTE au fichier CSV du jour
-    (data/retards_YYYY-MM-DD.csv), sans écraser ce qui a déjà été collecté.
+Principe :
+  - Le flux GTFS-RT liste, pour chaque train, ses PROCHAINS arrêts à venir.
+    Au fil du temps, les arrêts déjà passés disparaissent de cette liste.
+  - À chaque exécution (toutes les 15 min), on sauvegarde l'état de TOUS les
+    arrêts encore à venir pour chaque TGV INOUI actif -> data/arrets_en_cours.csv
+    (écrasé à chaque run).
+  - Si un arrêt qui était "à venir" lors du run précédent a DISPARU du run
+    actuel -> on considère qu'il vient d'être passé, et on enregistre sa
+    dernière valeur connue de retard (arrivée + départ) dans
+    data/retards_par_gare_YYYY-MM-DD.csv (une ligne par arrêt, jamais écrasée).
+
+Résultat concret : pour un Paris -> Nantes, vous aurez une ligne pour Paris
+(départ), une ligne pour Le Mans (arrivée+départ), une ligne pour Angers
+(arrivée+départ), une ligne pour Nantes (arrivée, terminus).
 
 Dépendances : requests, gtfs-realtime-bindings, pandas
 """
@@ -29,19 +38,30 @@ TRIPS_CACHE_FILE = os.path.join(CACHE_DIR, "trips.txt")
 ROUTES_CACHE_FILE = os.path.join(CACHE_DIR, "routes.txt")
 
 DATA_DIR = "data"
+STATE_FILE = os.path.join(DATA_DIR, "arrets_en_cours.csv")
 
 # Fenêtre de silence (heure locale Paris) : pas de collecte entre ces heures
 SILENCE_START_HOUR = 1
 SILENCE_END_HOUR = 4
 
-# Seuil de retard en secondes pour être conservé (0 = tout retard, même 1 sec)
-DELAY_THRESHOLD_SEC = 0
-
-# Mot-clé pour ne garder que les TGV INOUI (recherche insensible à la casse
-# dans route_long_name / route_short_name, ex: "OCETGV INOUI")
+# Mot-clé identifiant les TGV INOUI dans les stop_id (ex: "StopPoint:OCETGV INOUI-87725002")
 INOUI_KEYWORD = "INOUI"
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
+
+# Colonnes conservées dans les fichiers de sortie
+COLONNES_SORTIE = [
+    "trip_id",
+    "numero_train",
+    "destination",
+    "stop_sequence",
+    "gare",
+    "arrival_time",
+    "arrival_delay_sec",
+    "departure_time",
+    "departure_delay_sec",
+    "derniere_maj",
+]
 
 
 def is_in_silence_window(now_paris: datetime.datetime) -> bool:
@@ -73,9 +93,7 @@ def fmt_time(epoch):
     return datetime.datetime.fromtimestamp(epoch, tz=PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def collect_current_delays() -> pd.DataFrame:
-    from google.transit import gtfs_realtime_pb2
-
+def load_static_data():
     trips_df = pd.read_csv(TRIPS_CACHE_FILE, dtype=str).add_prefix("trip_")
     routes_df = pd.read_csv(ROUTES_CACHE_FILE, dtype=str).add_prefix("route_")
     stops_df = pd.read_csv(STOPS_CACHE_FILE, dtype=str).add_prefix("stop_")
@@ -83,6 +101,12 @@ def collect_current_delays() -> pd.DataFrame:
     trips_df = trips_df.merge(
         routes_df, left_on="trip_route_id", right_on="route_route_id", how="left"
     )
+    return trips_df, stops_df
+
+
+def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.DataFrame:
+    """Retourne une ligne par (train, arrêt à venir) pour tous les TGV INOUI actifs."""
+    from google.transit import gtfs_realtime_pb2
 
     print(f"Téléchargement du flux temps réel : {GTFS_RT_TRIP_UPDATES_URL}")
     resp = requests.get(GTFS_RT_TRIP_UPDATES_URL, timeout=30)
@@ -91,9 +115,9 @@ def collect_current_delays() -> pd.DataFrame:
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.ParseFromString(resp.content)
 
-    collecte_ts = datetime.datetime.now(tz=PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = datetime.datetime.now(tz=PARIS_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    rows = []
+    all_rows = []
     for entity in feed.entity:
         if not entity.HasField("trip_update"):
             continue
@@ -104,64 +128,43 @@ def collect_current_delays() -> pd.DataFrame:
         for stu in trip_update.stop_time_update:
             arr_delay = stu.arrival.delay if stu.HasField("arrival") and stu.arrival.HasField("delay") else None
             dep_delay = stu.departure.delay if stu.HasField("departure") and stu.departure.HasField("delay") else None
+            arr_time = stu.arrival.time if stu.HasField("arrival") and stu.arrival.HasField("time") else None
+            dep_time = stu.departure.time if stu.HasField("departure") and stu.departure.HasField("time") else None
 
-            has_arr_delay = arr_delay is not None and abs(arr_delay) > DELAY_THRESHOLD_SEC
-            has_dep_delay = dep_delay is not None and abs(dep_delay) > DELAY_THRESHOLD_SEC
-            if not (has_arr_delay or has_dep_delay):
-                continue
-
-            rows.append({
-                "collecte_horodatage": collecte_ts,
+            all_rows.append({
                 "trip_id": trip.trip_id,
+                "stop_sequence": stu.stop_sequence if stu.HasField("stop_sequence") else -1,
                 "stop_id_rt": stu.stop_id,
-                "arrival_time": fmt_time(stu.arrival.time) if stu.HasField("arrival") and stu.arrival.HasField("time") else "",
-                "arrival_delay_sec": arr_delay if arr_delay is not None else "",
-                "departure_time": fmt_time(stu.departure.time) if stu.HasField("departure") and stu.departure.HasField("time") else "",
-                "departure_delay_sec": dep_delay if dep_delay is not None else "",
+                "arrival_time": fmt_time(arr_time),
+                "arrival_delay_sec": arr_delay,
+                "departure_time": fmt_time(dep_time),
+                "departure_delay_sec": dep_delay,
             })
 
-    if not rows:
-        print("DIAGNOSTIC: 0 stop_time_update avec un retard détecté dans le flux brut.")
+    if not all_rows:
         return pd.DataFrame()
 
-    print(f"DIAGNOSTIC: {len(rows)} lignes avec retard détecté avant jointure statique.")
+    rt_df = pd.DataFrame(all_rows)
 
-    rt_df = pd.DataFrame(rows)
-    full_df = rt_df.merge(
-        trips_df, left_on="trip_id", right_on="trip_trip_id", how="left"
-    )
-    full_df = full_df.merge(
-        stops_df, left_on="stop_id_rt", right_on="stop_stop_id", how="left"
-    )
-
-    nb_non_matches = full_df["trip_trip_id"].isna().sum()
-    print(f"DIAGNOSTIC: {nb_non_matches}/{len(full_df)} trip_id du flux RT introuvables dans le GTFS statique en cache.")
-
-    # --- DIAGNOSTIC TEMPORAIRE : chercher INOUI dans TOUTES les colonnes ---
-    for col in full_df.columns:
-        try:
-            mask = full_df[col].astype(str).str.contains("INOUI", case=False, na=False)
-            if mask.any():
-                exemples = full_df.loc[mask, col].unique()[:5].tolist()
-                print(f"DIAGNOSTIC: colonne '{col}' contient INOUI, exemples: {exemples}")
-        except Exception:
-            pass
-    # ------------------------------------------------------------------------
-
-    # --- Filtre TGV INOUI (amélioré) ---
-    # 1. Identifier les trip_id qui ont AU MOINS UN arrêt marqué "INOUI"
-    #    dans leur stop_id (typiquement les gares avec quai dédié TGV INOUI).
-    trip_ids_inoui = full_df.loc[
-        full_df["stop_id_rt"].str.contains(INOUI_KEYWORD, case=False, na=False),
-        "trip_id"
+    # Identifier les trip_id TGV INOUI (au moins un stop_id contenant "INOUI")
+    trip_ids_inoui = rt_df.loc[
+        rt_df["stop_id_rt"].str.contains(INOUI_KEYWORD, case=False, na=False), "trip_id"
     ].unique()
+    rt_df = rt_df[rt_df["trip_id"].isin(trip_ids_inoui)]
 
-    print(f"DIAGNOSTIC: {len(trip_ids_inoui)} trip_id identifiés comme TGV INOUI.")
+    if rt_df.empty:
+        return pd.DataFrame()
 
-    # 2. Garder TOUS les arrêts de ces trains (pas seulement les arrêts marqués INOUI)
-    full_df = full_df[full_df["trip_id"].isin(trip_ids_inoui)]
-    print(f"DIAGNOSTIC: {len(full_df)} lignes après filtre INOUI (tous les arrêts des trains identifiés).")
-    # -------------------------
+    # Enrichir avec les infos statiques (numéro de train, destination, nom de gare)
+    full_df = rt_df.merge(trips_df, left_on="trip_id", right_on="trip_trip_id", how="left")
+    full_df = full_df.merge(stops_df, left_on="stop_id_rt", right_on="stop_stop_id", how="left")
+
+    full_df["numero_train"] = full_df.get("trip_trip_short_name", "")
+    full_df["destination"] = full_df.get("trip_trip_headsign", "")
+    full_df["gare"] = full_df.get("stop_stop_name", "")
+    full_df["derniere_maj"] = now_ts
+
+    full_df = full_df.reindex(columns=COLONNES_SORTIE)
 
     return full_df
 
@@ -174,24 +177,53 @@ def main():
         return
 
     ensure_static_gtfs()
-    new_df = collect_current_delays()
+    trips_df, stops_df = load_static_data()
+    current_stops = fetch_current_stops(trips_df, stops_df)
 
     os.makedirs(DATA_DIR, exist_ok=True)
     day_str = now_paris.strftime("%Y-%m-%d")
-    filepath = os.path.join(DATA_DIR, f"retards_{day_str}.csv")
+    finaux_filepath = os.path.join(DATA_DIR, f"retards_par_gare_{day_str}.csv")
 
-    if new_df.empty:
-        print("Aucun retard actuellement, rien à ajouter.")
-        return
-
-    if os.path.exists(filepath):
-        existing_df = pd.read_csv(filepath, sep=";", dtype=str)
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+    # Charger l'état des arrêts encore "à venir" lors du run précédent
+    if os.path.exists(STATE_FILE):
+        previous_stops = pd.read_csv(STATE_FILE, sep=";", dtype=str)
     else:
-        combined_df = new_df
+        previous_stops = pd.DataFrame(columns=COLONNES_SORTIE)
 
-    combined_df.to_csv(filepath, index=False, sep=";", encoding="utf-8")
-    print(f"✅ {len(new_df)} nouvelles lignes ajoutées à {filepath} (total: {len(combined_df)})")
+    # Clé unique = (trip_id, stop_sequence) : identifie un arrêt précis d'un train précis
+    def make_keys(df):
+        if df.empty:
+            return set()
+        return set(zip(df["trip_id"], df["stop_sequence"].astype(str)))
+
+    current_keys = make_keys(current_stops)
+    previous_keys = make_keys(previous_stops)
+
+    # Arrêts présents avant, plus maintenant -> considérés comme "passés"
+    keys_passes = previous_keys - current_keys
+
+    print(f"{len(current_keys)} arrêt(s) à venir actuellement, pour des TGV INOUI actifs.")
+    print(f"{len(keys_passes)} arrêt(s) détecté(s) comme passés depuis la dernière collecte.")
+
+    if keys_passes and not previous_stops.empty:
+        previous_stops["_cle"] = list(zip(previous_stops["trip_id"], previous_stops["stop_sequence"].astype(str)))
+        finaux_df = previous_stops[previous_stops["_cle"].isin(keys_passes)].drop(columns=["_cle"]).copy()
+        finaux_df["heure_detection_passage"] = now_paris.strftime("%Y-%m-%d %H:%M:%S")
+
+        if os.path.exists(finaux_filepath):
+            existing = pd.read_csv(finaux_filepath, sep=";", dtype=str)
+            combined = pd.concat([existing, finaux_df], ignore_index=True)
+        else:
+            combined = finaux_df
+
+        combined.to_csv(finaux_filepath, index=False, sep=";", encoding="utf-8")
+        print(f"✅ {len(finaux_df)} arrêt(s) finalisé(s) ajouté(s) à {finaux_filepath}")
+
+    # Sauvegarder le nouvel état des arrêts encore à venir (écrase l'ancien)
+    if not current_stops.empty:
+        current_stops.to_csv(STATE_FILE, index=False, sep=";", encoding="utf-8")
+    else:
+        pd.DataFrame(columns=COLONNES_SORTIE).to_csv(STATE_FILE, index=False, sep=";", encoding="utf-8")
 
 
 if __name__ == "__main__":
