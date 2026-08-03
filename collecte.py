@@ -1,21 +1,22 @@
 """
-Collecte des RETARDS FINAUX par ARRÊT des TGV INOUI - conçu pour GitHub Actions
-=================================================================================
+Collecte des retards TGV INOUI - TOUTES les gares du trajet si retard détecté
+================================================================================
 
-Principe :
-  - Le flux GTFS-RT liste, pour chaque train, ses PROCHAINS arrêts à venir.
-    Au fil du temps, les arrêts déjà passés disparaissent de cette liste.
-  - À chaque exécution (toutes les 15 min), on sauvegarde l'état de TOUS les
-    arrêts encore à venir pour chaque TGV INOUI actif -> data/arrets_en_cours.csv
-    (écrasé à chaque run).
-  - Si un arrêt qui était "à venir" lors du run précédent a DISPARU du run
-    actuel -> on considère qu'il vient d'être passé, et on enregistre sa
-    dernière valeur connue de retard (arrivée + départ) dans
-    data/retards_par_gare_YYYY-MM-DD.csv (une ligne par arrêt, jamais écrasée).
+Principe (en 3 fichiers) :
 
-Résultat concret : pour un Paris -> Nantes, vous aurez une ligne pour Paris
-(départ), une ligne pour Le Mans (arrivée+départ), une ligne pour Angers
-(arrivée+départ), une ligne pour Nantes (arrivée, terminus).
+  1. data/arrets_en_cours.csv (écrasé à chaque run)
+     -> les arrêts encore À VENIR pour chaque TGV INOUI actif.
+
+  2. data/historique_temp.csv (écrasé à chaque run, invisible pour vous normalement)
+     -> au fur et à mesure qu'un arrêt est "passé" (disparaît des arrêts à venir),
+        il est ajouté ici, pour TOUS les trains encore en circulation, qu'il y ait
+        du retard ou non. C'est la mémoire complète du trajet en cours de constitution.
+
+  3. data/retards_par_gare_YYYY-MM-DD.csv (jamais écrasé, s'enrichit au fil du jour)
+     -> UNE FOIS qu'un train a totalement disparu du flux (trajet terminé), on
+        regarde tout son historique : s'il y a eu au moins un retard sur UNE
+        gare, alors TOUTES les gares de son trajet sont écrites ici. Sinon,
+        rien n'est écrit pour ce train (trajet 100% à l'heure = pas intéressant).
 
 Dépendances : requests, gtfs-realtime-bindings, pandas
 """
@@ -39,6 +40,7 @@ ROUTES_CACHE_FILE = os.path.join(CACHE_DIR, "routes.txt")
 
 DATA_DIR = "data"
 STATE_FILE = os.path.join(DATA_DIR, "arrets_en_cours.csv")
+HISTORIQUE_FILE = os.path.join(DATA_DIR, "historique_temp.csv")
 
 # Fenêtre de silence (heure locale Paris) : pas de collecte entre ces heures
 SILENCE_START_HOUR = 1
@@ -47,9 +49,12 @@ SILENCE_END_HOUR = 4
 # Mot-clé identifiant les TGV INOUI dans les stop_id (ex: "StopPoint:OCETGV INOUI-87725002")
 INOUI_KEYWORD = "INOUI"
 
+# Seuil de retard en secondes : un TRAIN entier n'est publié que si AU MOINS
+# UN de ses arrêts dépasse ce seuil (arrivée ou départ). 0 = tout retard, même 1 sec.
+DELAY_THRESHOLD_SEC = 0
+
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
-# Colonnes conservées dans les fichiers de sortie
 COLONNES_SORTIE = [
     "trip_id",
     "numero_train",
@@ -146,7 +151,6 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
 
     rt_df = pd.DataFrame(all_rows)
 
-    # Identifier les trip_id TGV INOUI (au moins un stop_id contenant "INOUI")
     trip_ids_inoui = rt_df.loc[
         rt_df["stop_id_rt"].str.contains(INOUI_KEYWORD, case=False, na=False), "trip_id"
     ].unique()
@@ -155,7 +159,6 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
     if rt_df.empty:
         return pd.DataFrame()
 
-    # Enrichir avec les infos statiques (numéro de train, destination, nom de gare)
     full_df = rt_df.merge(trips_df, left_on="trip_id", right_on="trip_trip_id", how="left")
     full_df = full_df.merge(stops_df, left_on="stop_id_rt", right_on="stop_stop_id", how="left")
 
@@ -167,6 +170,12 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
     full_df = full_df.reindex(columns=COLONNES_SORTIE)
 
     return full_df
+
+
+def load_csv_or_empty(path, sep=";"):
+    if os.path.exists(path):
+        return pd.read_csv(path, sep=sep, dtype=str)
+    return pd.DataFrame(columns=COLONNES_SORTIE)
 
 
 def main():
@@ -184,13 +193,9 @@ def main():
     day_str = now_paris.strftime("%Y-%m-%d")
     finaux_filepath = os.path.join(DATA_DIR, f"retards_par_gare_{day_str}.csv")
 
-    # Charger l'état des arrêts encore "à venir" lors du run précédent
-    if os.path.exists(STATE_FILE):
-        previous_stops = pd.read_csv(STATE_FILE, sep=";", dtype=str)
-    else:
-        previous_stops = pd.DataFrame(columns=COLONNES_SORTIE)
+    previous_stops = load_csv_or_empty(STATE_FILE)
+    historique_df = load_csv_or_empty(HISTORIQUE_FILE)
 
-    # Clé unique = (trip_id, stop_sequence) : identifie un arrêt précis d'un train précis
     def make_keys(df):
         if df.empty:
             return set()
@@ -198,32 +203,66 @@ def main():
 
     current_keys = make_keys(current_stops)
     previous_keys = make_keys(previous_stops)
-
-    # Arrêts présents avant, plus maintenant -> considérés comme "passés"
     keys_passes = previous_keys - current_keys
 
     print(f"{len(current_keys)} arrêt(s) à venir actuellement, pour des TGV INOUI actifs.")
     print(f"{len(keys_passes)} arrêt(s) détecté(s) comme passés depuis la dernière collecte.")
 
+    # --- Étape 1 : ajouter les arrêts qui viennent d'être passés à l'historique temporaire ---
     if keys_passes and not previous_stops.empty:
         previous_stops["_cle"] = list(zip(previous_stops["trip_id"], previous_stops["stop_sequence"].astype(str)))
-        finaux_df = previous_stops[previous_stops["_cle"].isin(keys_passes)].drop(columns=["_cle"]).copy()
-        finaux_df["heure_detection_passage"] = now_paris.strftime("%Y-%m-%d %H:%M:%S")
+        nouveaux_passes = previous_stops[previous_stops["_cle"].isin(keys_passes)].drop(columns=["_cle"]).copy()
+        historique_df = pd.concat([historique_df, nouveaux_passes], ignore_index=True)
 
-        if os.path.exists(finaux_filepath):
-            existing = pd.read_csv(finaux_filepath, sep=";", dtype=str)
-            combined = pd.concat([existing, finaux_df], ignore_index=True)
+    # --- Étape 2 : détecter les trains entièrement terminés (plus aucun arrêt à venir) ---
+    current_trip_ids = set(current_stops["trip_id"]) if not current_stops.empty else set()
+    historique_trip_ids = set(historique_df["trip_id"]) if not historique_df.empty else set()
+    trips_termines = historique_trip_ids - current_trip_ids
+
+    print(f"{len(trips_termines)} train(s) entièrement terminé(s) à traiter.")
+
+    if trips_termines:
+        lignes_a_publier = []
+
+        for trip_id in trips_termines:
+            trajet_df = historique_df[historique_df["trip_id"] == trip_id]
+
+            arr_num = pd.to_numeric(trajet_df["arrival_delay_sec"], errors="coerce")
+            dep_num = pd.to_numeric(trajet_df["departure_delay_sec"], errors="coerce")
+            a_du_retard_qqpart = ((arr_num.abs() > DELAY_THRESHOLD_SEC) | (dep_num.abs() > DELAY_THRESHOLD_SEC)).any()
+
+            if a_du_retard_qqpart:
+                lignes_a_publier.append(trajet_df)
+
+        # Retirer tous les trains terminés de l'historique temporaire (traités, qu'ils soient publiés ou non)
+        historique_df = historique_df[~historique_df["trip_id"].isin(trips_termines)]
+
+        if lignes_a_publier:
+            a_publier_df = pd.concat(lignes_a_publier, ignore_index=True)
+            a_publier_df["heure_detection_fin_trajet"] = now_paris.strftime("%Y-%m-%d %H:%M:%S")
+            a_publier_df = a_publier_df.sort_values(["trip_id", "stop_sequence"])
+
+            if os.path.exists(finaux_filepath):
+                existing = pd.read_csv(finaux_filepath, sep=";", dtype=str)
+                combined = pd.concat([existing, a_publier_df], ignore_index=True)
+            else:
+                combined = a_publier_df
+
+            combined.to_csv(finaux_filepath, index=False, sep=";", encoding="utf-8")
+            print(f"✅ {len(lignes_a_publier)} train(s) en retard publiés ({len(a_publier_df)} gares au total) dans {finaux_filepath}")
         else:
-            combined = finaux_df
+            print("Tous les trains terminés étaient 100% à l'heure, rien à publier.")
 
-        combined.to_csv(finaux_filepath, index=False, sep=";", encoding="utf-8")
-        print(f"✅ {len(finaux_df)} arrêt(s) finalisé(s) ajouté(s) à {finaux_filepath}")
-
-    # Sauvegarder le nouvel état des arrêts encore à venir (écrase l'ancien)
+    # --- Sauvegarder les états pour le prochain run ---
     if not current_stops.empty:
         current_stops.to_csv(STATE_FILE, index=False, sep=";", encoding="utf-8")
     else:
         pd.DataFrame(columns=COLONNES_SORTIE).to_csv(STATE_FILE, index=False, sep=";", encoding="utf-8")
+
+    if not historique_df.empty:
+        historique_df.to_csv(HISTORIQUE_FILE, index=False, sep=";", encoding="utf-8")
+    else:
+        pd.DataFrame(columns=COLONNES_SORTIE).to_csv(HISTORIQUE_FILE, index=False, sep=";", encoding="utf-8")
 
 
 if __name__ == "__main__":
