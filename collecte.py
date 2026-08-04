@@ -46,8 +46,27 @@ HISTORIQUE_FILE = os.path.join(DATA_DIR, "historique_temp.csv")
 SILENCE_START_HOUR = 1
 SILENCE_END_HOUR = 4
 
-# Mot-clé identifiant les TGV INOUI dans les stop_id (ex: "StopPoint:OCETGV INOUI-87725002")
+# Mot-clé identifiant les TGV INOUI dans les stop_id (gardé pour référence/diagnostic)
 INOUI_KEYWORD = "INOUI"
+
+# Gares surveillées : un train n'est retenu que s'il passe par AU MOINS UNE
+# de ces gares (identifiées par leur stop_id exact du flux GTFS-RT).
+GARES_SUIVIES = {
+    "StopPoint:OCETGV INOUI-87581009",  # Bordeaux
+    "StopPoint:OCETGV INOUI-87391003",  # Paris Montparnasse
+    "StopPoint:OCETGV INOUI-87393702",  # Massy
+    "StopPoint:OCETGV INOUI-87575001",  # Poitiers
+    "StopPoint:OCETGV INOUI-87583005",  # Angoulême
+    "StopPoint:OCETGV INOUI-87481002",  # Nantes
+    "StopPoint:OCETGV INOUI-87471003",  # Rennes
+    "StopPoint:OCETGV INOUI-87396002",  # Le Mans
+    "StopPoint:OCETGV INOUI-87484006",  # Angers
+    "StopPoint:OCETGV INOUI-87481788",  # Le Croisic
+    "StopPoint:OCETGV INOUI-87486449",  # Les Sables d'Olonne
+    "StopPoint:OCETGV INOUI-87396408",  # Sablé-sur-Sarthe
+    "StopPoint:OCETGV INOUI-87481192",  # Ancenis
+    "StopArea:OCE87437798",             # La Rochelle
+}
 
 # Seuil de retard en secondes : un TRAIN entier n'est publié que si AU MOINS
 # UN de ses arrêts dépasse ce seuil (arrivée ou départ). 0 = tout retard, même 1 sec.
@@ -152,7 +171,7 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
     rt_df = pd.DataFrame(all_rows)
 
     trip_ids_inoui = rt_df.loc[
-        rt_df["stop_id_rt"].str.contains(INOUI_KEYWORD, case=False, na=False), "trip_id"
+        rt_df["stop_id_rt"].isin(GARES_SUIVIES), "trip_id"
     ].unique()
     rt_df = rt_df[rt_df["trip_id"].isin(trip_ids_inoui)]
 
@@ -190,8 +209,6 @@ def main():
     current_stops = fetch_current_stops(trips_df, stops_df)
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    day_str = now_paris.strftime("%Y-%m-%d")
-    finaux_filepath = os.path.join(DATA_DIR, f"retards_par_gare_{day_str}.csv")
 
     previous_stops = load_csv_or_empty(STATE_FILE)
     historique_df = load_csv_or_empty(HISTORIQUE_FILE)
@@ -222,34 +239,58 @@ def main():
     print(f"{len(trips_termines)} train(s) entièrement terminé(s) à traiter.")
 
     if trips_termines:
-        lignes_a_publier = []
+        lignes_par_date = {}  # date_str (première gare du trajet) -> liste de DataFrames
 
         for trip_id in trips_termines:
-            trajet_df = historique_df[historique_df["trip_id"] == trip_id]
+            trajet_df = historique_df[historique_df["trip_id"] == trip_id].sort_values("stop_sequence")
 
             arr_num = pd.to_numeric(trajet_df["arrival_delay_sec"], errors="coerce")
             dep_num = pd.to_numeric(trajet_df["departure_delay_sec"], errors="coerce")
             a_du_retard_qqpart = ((arr_num.abs() > DELAY_THRESHOLD_SEC) | (dep_num.abs() > DELAY_THRESHOLD_SEC)).any()
 
-            if a_du_retard_qqpart:
-                lignes_a_publier.append(trajet_df)
+            if not a_du_retard_qqpart:
+                continue
+
+            # Déterminer la date de la TOUTE PREMIÈRE gare du trajet (départ, ou arrivée à défaut)
+            premiere_ligne = trajet_df.iloc[0]
+            date_str = None
+            for champ in ("departure_time", "arrival_time"):
+                valeur = premiere_ligne.get(champ, "")
+                if isinstance(valeur, str) and len(valeur) >= 10:
+                    date_str = valeur[:10]
+                    break
+            if date_str is None:
+                date_str = now_paris.strftime("%Y-%m-%d")  # secours si aucune heure connue
+
+            lignes_par_date.setdefault(date_str, []).append(trajet_df)
 
         # Retirer tous les trains terminés de l'historique temporaire (traités, qu'ils soient publiés ou non)
         historique_df = historique_df[~historique_df["trip_id"].isin(trips_termines)]
 
-        if lignes_a_publier:
-            a_publier_df = pd.concat(lignes_a_publier, ignore_index=True)
-            a_publier_df["heure_detection_fin_trajet"] = now_paris.strftime("%Y-%m-%d %H:%M:%S")
-            a_publier_df = a_publier_df.sort_values(["trip_id", "stop_sequence"])
+        if lignes_par_date:
+            for date_str, groupes in lignes_par_date.items():
+                finaux_filepath = os.path.join(DATA_DIR, f"retards_par_gare_{date_str}.csv")
 
-            if os.path.exists(finaux_filepath):
-                existing = pd.read_csv(finaux_filepath, sep=";", dtype=str)
-                combined = pd.concat([existing, a_publier_df], ignore_index=True)
-            else:
-                combined = a_publier_df
+                a_publier_df = pd.concat(groupes, ignore_index=True)
+                a_publier_df["heure_detection_fin_trajet"] = now_paris.strftime("%Y-%m-%d %H:%M:%S")
+                a_publier_df = a_publier_df.sort_values(["trip_id", "stop_sequence"])
 
-            combined.to_csv(finaux_filepath, index=False, sep=";", encoding="utf-8")
-            print(f"✅ {len(lignes_a_publier)} train(s) en retard publiés ({len(a_publier_df)} gares au total) dans {finaux_filepath}")
+                # --- Conversion des retards de secondes en minutes (arrondi) pour le fichier final ---
+                arr_sec = pd.to_numeric(a_publier_df["arrival_delay_sec"], errors="coerce")
+                dep_sec = pd.to_numeric(a_publier_df["departure_delay_sec"], errors="coerce")
+                a_publier_df["arrival_delay_min"] = (arr_sec / 60).round().astype("Int64")
+                a_publier_df["departure_delay_min"] = (dep_sec / 60).round().astype("Int64")
+                a_publier_df = a_publier_df.drop(columns=["arrival_delay_sec", "departure_delay_sec"])
+                # -------------------------------------------------------------------------------------
+
+                if os.path.exists(finaux_filepath):
+                    existing = pd.read_csv(finaux_filepath, sep=";", dtype=str)
+                    combined = pd.concat([existing, a_publier_df], ignore_index=True)
+                else:
+                    combined = a_publier_df
+
+                combined.to_csv(finaux_filepath, index=False, sep=";", encoding="utf-8")
+                print(f"✅ {len(groupes)} train(s) en retard publiés ({len(a_publier_df)} gares) dans {finaux_filepath} (date de départ du trajet)")
         else:
             print("Tous les trains terminés étaient 100% à l'heure, rien à publier.")
 
