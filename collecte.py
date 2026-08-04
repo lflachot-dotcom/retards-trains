@@ -190,13 +190,15 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
     return full_df
 
 
-def load_csv_or_empty(path, sep=";"):
+def load_csv_or_empty(path, sep=";", default_columns=None):
+    if default_columns is None:
+        default_columns = COLONNES_SORTIE
     if os.path.exists(path) and os.path.getsize(path) > 0:
         try:
             return pd.read_csv(path, sep=sep, dtype=str)
         except pd.errors.EmptyDataError:
-            return pd.DataFrame(columns=COLONNES_SORTIE)
-    return pd.DataFrame(columns=COLONNES_SORTIE)
+            return pd.DataFrame(columns=default_columns)
+    return pd.DataFrame(columns=default_columns)
 
 
 def main():
@@ -286,10 +288,13 @@ def main():
                 # -------------------------------------------------------------------------------------
 
                 if os.path.exists(finaux_filepath):
-                    existing = pd.read_csv(finaux_filepath, sep=";", dtype=str)
-                    combined = pd.concat([existing, a_publier_df], ignore_index=True)
+                    existing = load_csv_or_empty(finaux_filepath, default_columns=[])
                 else:
                     combined = a_publier_df
+                    existing = None
+
+                if existing is not None:
+                    combined = pd.concat([existing, a_publier_df], ignore_index=True)
 
                 combined.to_csv(finaux_filepath, index=False, sep=";", encoding="utf-8")
                 print(f"✅ {len(groupes)} train(s) en retard publiés ({len(a_publier_df)} gares) dans {finaux_filepath} (date de départ du trajet)")
