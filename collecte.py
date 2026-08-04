@@ -191,8 +191,11 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
 
 
 def load_csv_or_empty(path, sep=";"):
-    if os.path.exists(path):
-        return pd.read_csv(path, sep=sep, dtype=str)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        try:
+            return pd.read_csv(path, sep=sep, dtype=str)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame(columns=COLONNES_SORTIE)
     return pd.DataFrame(columns=COLONNES_SORTIE)
 
 
