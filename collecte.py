@@ -170,10 +170,9 @@ def fetch_current_stops(trips_df: pd.DataFrame, stops_df: pd.DataFrame) -> pd.Da
 
     rt_df = pd.DataFrame(all_rows)
 
-    trip_ids_inoui = rt_df.loc[
-        rt_df["stop_id_rt"].isin(GARES_SUIVIES), "trip_id"
-    ].unique()
-    rt_df = rt_df[rt_df["trip_id"].isin(trip_ids_inoui)]
+    # Ne garder QUE les arrêts dans les gares surveillées (pas les gares
+    # intermédiaires non listées, même si elles font partie du même trajet).
+    rt_df = rt_df[rt_df["stop_id_rt"].isin(GARES_SUIVIES)]
 
     if rt_df.empty:
         return pd.DataFrame()
