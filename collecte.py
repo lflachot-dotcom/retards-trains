@@ -65,7 +65,7 @@ GARES_SUIVIES = {
     "StopPoint:OCETGV INOUI-87486449",  # Les Sables d'Olonne
     "StopPoint:OCETGV INOUI-87396408",  # Sablé-sur-Sarthe
     "StopPoint:OCETGV INOUI-87481192",  # Ancenis
-    "StopArea:OCE87437798",             # La Rochelle
+    "StopPoint:OCETGV INOUI-87485003",  # La Rochelle
 }
 
 # Seuil de retard en secondes : un TRAIN entier n'est publié que si AU MOINS
