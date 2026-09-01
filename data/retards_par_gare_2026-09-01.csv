@@ -1,0 +1,2 @@
+trip_id;numero_train;destination;stop_sequence;gare;arrival_time;departure_time;derniere_maj;heure_detection_fin_trajet;arrival_delay_min;departure_delay_min
+OCESN8300F1187_F:OUI:FR:Line::B5CF3630-53A0-4E1C-BF67-9B0EC6B69C5E::87571000:87391003:4:727:20261211;;8300;-1;Paris Montparnasse Hall 1 - 2;2026-09-01 07:47:00;;2026-09-01 07:50:45;2026-09-01 07:55:36;20;
