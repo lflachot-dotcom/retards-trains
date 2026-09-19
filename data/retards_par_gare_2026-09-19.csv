@@ -1,0 +1,3 @@
+trip_id;numero_train;destination;stop_sequence;gare;arrival_time;departure_time;derniere_maj;heure_detection_fin_trajet;arrival_delay_min;departure_delay_min
+OCESN8330F1187_F:OUI:FR:Line::1C59DA64-5D12-4600-9092-4E99FCBFAC7A::87575001:87391003:5:836:20261212;;8330;-1;Poitiers;;2026-09-19 06:32:00;2026-09-19 08:45:43;2026-09-19 08:50:43;;0
+OCESN8330F1187_F:OUI:FR:Line::1C59DA64-5D12-4600-9092-4E99FCBFAC7A::87575001:87391003:5:836:20261212;;8330;-1;Paris Montparnasse Hall 1 - 2;2026-09-19 08:41:00;;2026-09-19 08:45:43;2026-09-19 08:50:43;5;
