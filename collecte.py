@@ -41,6 +41,12 @@ ROUTES_CACHE_FILE = os.path.join(CACHE_DIR, "routes.txt")
 DATA_DIR = "data"
 STATE_FILE = os.path.join(DATA_DIR, "arrets_en_cours.csv")
 HISTORIQUE_FILE = os.path.join(DATA_DIR, "historique_temp.csv")
+ABSENCES_FILE = os.path.join(DATA_DIR, "absences_en_cours.csv")
+
+# Un train disparu du flux n'est considéré "vraiment terminé" qu'après être
+# resté absent au moins ce nombre de minutes d'affilée (tolère les glitches
+# temporaires du flux SNCF, où un train bien réel disparaît un cycle puis revient).
+DELAI_GRACE_MINUTES = 20
 
 # Fenêtre de silence (heure locale Paris) : pas de collecte entre ces heures
 SILENCE_START_HOUR = 1
@@ -65,7 +71,7 @@ GARES_SUIVIES = {
     "StopPoint:OCETGV INOUI-87486449",  # Les Sables d'Olonne
     "StopPoint:OCETGV INOUI-87396408",  # Sablé-sur-Sarthe
     "StopPoint:OCETGV INOUI-87481192",  # Ancenis
-    "StopPoint:OCETGV INOUI-87485003",  # La Rochelle
+    "StopArea:OCE87437798",             # La Rochelle
 }
 
 # Seuil de retard en secondes : un TRAIN entier n'est publié que si AU MOINS
@@ -216,6 +222,7 @@ def main():
 
     previous_stops = load_csv_or_empty(STATE_FILE)
     historique_df = load_csv_or_empty(HISTORIQUE_FILE)
+    absences_df = load_csv_or_empty(ABSENCES_FILE, default_columns=["trip_id", "premiere_absence"])
 
     def make_keys(df):
         if df.empty:
@@ -235,12 +242,42 @@ def main():
         nouveaux_passes = previous_stops[previous_stops["_cle"].isin(keys_passes)].drop(columns=["_cle"]).copy()
         historique_df = pd.concat([historique_df, nouveaux_passes], ignore_index=True)
 
-    # --- Étape 2 : détecter les trains entièrement terminés (plus aucun arrêt à venir) ---
+    # --- Étape 2 : détecter les trains ABSENTS du flux (candidats à la terminaison) ---
     current_trip_ids = set(current_stops["trip_id"]) if not current_stops.empty else set()
     historique_trip_ids = set(historique_df["trip_id"]) if not historique_df.empty else set()
-    trips_termines = historique_trip_ids - current_trip_ids
+    trips_absents_maintenant = historique_trip_ids - current_trip_ids
 
-    print(f"{len(trips_termines)} train(s) entièrement terminé(s) à traiter.")
+    # Convertir l'état des absences en dict {trip_id: premiere_absence (datetime)}
+    absences = {}
+    if not absences_df.empty:
+        for _, row in absences_df.iterrows():
+            try:
+                absences[row["trip_id"]] = datetime.datetime.strptime(
+                    row["premiere_absence"], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=PARIS_TZ)
+            except (ValueError, TypeError):
+                pass
+
+    # Un train réapparu dans le flux n'est plus "absent" : on efface sa mémoire d'absence
+    for trip_id in list(absences.keys()):
+        if trip_id in current_trip_ids:
+            del absences[trip_id]
+
+    # Pour chaque train absent, enregistrer la première fois où on l'a vu absent
+    trips_termines = set()
+    for trip_id in trips_absents_maintenant:
+        if trip_id not in absences:
+            absences[trip_id] = now_paris
+        else:
+            minutes_absent = (now_paris - absences[trip_id]).total_seconds() / 60
+            if minutes_absent >= DELAI_GRACE_MINUTES:
+                trips_termines.add(trip_id)
+
+    # Les trains confirmés terminés n'ont plus besoin d'être suivis dans les absences
+    for trip_id in trips_termines:
+        absences.pop(trip_id, None)
+
+    print(f"{len(trips_absents_maintenant)} train(s) actuellement absent(s) du flux (dont {len(trips_termines)} confirmé(s) terminé(s) après {DELAI_GRACE_MINUTES} min).")
 
     if trips_termines:
         lignes_par_date = {}  # date_str (première gare du trajet) -> liste de DataFrames
@@ -311,6 +348,15 @@ def main():
         historique_df.to_csv(HISTORIQUE_FILE, index=False, sep=";", encoding="utf-8")
     else:
         pd.DataFrame(columns=COLONNES_SORTIE).to_csv(HISTORIQUE_FILE, index=False, sep=";", encoding="utf-8")
+
+    if absences:
+        absences_out_df = pd.DataFrame([
+            {"trip_id": tid, "premiere_absence": dt.strftime("%Y-%m-%d %H:%M:%S")}
+            for tid, dt in absences.items()
+        ])
+        absences_out_df.to_csv(ABSENCES_FILE, index=False, sep=";", encoding="utf-8")
+    else:
+        pd.DataFrame(columns=["trip_id", "premiere_absence"]).to_csv(ABSENCES_FILE, index=False, sep=";", encoding="utf-8")
 
 
 if __name__ == "__main__":
